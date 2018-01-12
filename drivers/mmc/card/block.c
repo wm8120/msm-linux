@@ -44,6 +44,8 @@
 
 #include <asm/uaccess.h>
 
+#include <linux/debugfs.h>
+
 #include "queue.h"
 
 MODULE_ALIAS("mmc:block");
@@ -3372,6 +3374,39 @@ static struct mmc_driver mmc_driver = {
 	.shutdown	= mmc_blk_shutdown,
 };
 
+static int mmc_onpersist_file_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, NULL, inode->i_private);
+}
+
+static struct file_operations mmc_onpersist_fops = {
+	.open		= mmc_onpersist_file_open,
+	.read		= seq_read,
+	.write		= NULL,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int mmc_register_debugfs_file(void)
+{
+    struct dentry *parent = NULL;
+    struct dentry *file = NULL;
+
+    parent = debugfs_create_dir("onpersist", NULL);
+    if (IS_ERR_OR_NULL(parent)) {
+        pr_err("Cannot create directory in debugfs\n"); 
+        return -ENODEV;
+    }
+
+    file = debugfs_create_file("trace", S_IWUSR | S_IRUGO, parent, NULL, &mmc_onpersist_fops);
+    if (IS_ERR_OR_NULL(file)) {
+        pr_err("Cannot create file in debugfs\n"); 
+        return -ENODEV;
+    }
+    
+    return 0;
+}
+
 static int __init mmc_blk_init(void)
 {
 	int res;
@@ -3380,6 +3415,12 @@ static int __init mmc_blk_init(void)
 		pr_info("mmcblk: using %d minors per device\n", perdev_minors);
 
 	max_devices = 256 / perdev_minors;
+
+        // register debugfs
+        res = mmc_register_debugfs_file();
+        if (res) {
+            pr_err("Error on creating debugfs file.\n");
+        }
 
 	res = register_blkdev(MMC_BLOCK_MAJOR, "mmc");
 	if (res)
