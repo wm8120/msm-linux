@@ -3374,15 +3374,29 @@ static struct mmc_driver mmc_driver = {
 	.shutdown	= mmc_blk_shutdown,
 };
 
+static ssize_t mmc_onpersist_file_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+        printk("Persist buffered writes.\n"); 
+
+        return count;
+}
+
+static int mmc_onpersist_show(struct seq_file *sf, void *data)
+{
+        seq_printf(sf, "trace is on the way.\n");    
+
+        return 0;
+}
+
 static int mmc_onpersist_file_open(struct inode *inode, struct file *file)
 {
-    return single_open(file, NULL, inode->i_private);
+    return single_open(file, mmc_onpersist_show, inode->i_private);
 }
 
 static struct file_operations mmc_onpersist_fops = {
 	.open		= mmc_onpersist_file_open,
 	.read		= seq_read,
-	.write		= NULL,
+	.write		= mmc_onpersist_file_write,
 	.llseek		= seq_lseek,
 	.release	= single_release,
 };
