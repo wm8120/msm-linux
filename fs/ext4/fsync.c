@@ -251,8 +251,12 @@ int ext4_sync_file(struct file *file, loff_t start, loff_t end, int datasync)
 	 *  (they were dirtied by commit).  But that's OK - the blocks are
 	 *  safe in-journal, which is all fsync() needs to ensure.
 	 */
+
+        /* We only target on data journal mode, where after call ext4_force_commit
+         * this function return, but we do not want it to really sync, so we comment
+         * them out here */
 	if (ext4_should_journal_data(inode)) {
-		ret = ext4_force_commit(inode->i_sb);
+		// ret = ext4_force_commit(inode->i_sb);
 		goto out;
 	}
 
