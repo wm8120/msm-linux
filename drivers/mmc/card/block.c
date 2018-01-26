@@ -100,6 +100,22 @@ static int max_devices;
 static DECLARE_BITMAP(dev_use, 256);
 static DECLARE_BITMAP(name_use, 256);
 
+/* Struct for block trace */
+struct mmc_blk_trace {
+	spinlock_t	lock;
+        bool            enable;
+        void*           data;
+        size_t          offset;
+};
+
+static struct mmc_blk_trace mmc_btrace;
+
+static int mmc_onpersist_trace(const char *trace);
+
+/* 4kb trace buffer */
+#define MMC_BLK_TRACE_SIZE        (1 << 12)
+#define MMC_BLK_TRACE_LINE_LEN    100
+
 /*
  * There is one mmc_blk_data per slot.
  */
@@ -1497,6 +1513,10 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
 	struct mmc_blk_data *md = mq->data;
 	struct mmc_card *card = md->queue.card;
 	int ret = 0;
+        char trace[MMC_BLK_TRACE_LINE_LEN+1];
+
+        snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "F\n");
+        mmc_onpersist_trace(trace);
 
 	ret = mmc_flush_cache(card);
 	if (ret) {
@@ -2537,9 +2557,18 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 		return 0;
 
 	if (rqc) {
+                char rw;
+                char trace[MMC_BLK_TRACE_LINE_LEN+1];
+
 		if ((card->ext_csd.bkops_en) && (rq_data_dir(rqc) == WRITE))
 			card->bkops_info.sectors_changed += blk_rq_sectors(rqc);
 		reqs = mmc_blk_prep_packed_list(mq, rqc);
+
+                rw = (rq_data_dir(rqc) == WRITE)?'W':'R';
+                snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "%c %lu %lu %sp%d\n",
+                        rw, (unsigned long) blk_rq_pos(rqc),
+                        (unsigned long) blk_rq_sectors(rqc), md->disk->disk_name, rqc->part->partno);
+                mmc_onpersist_trace(trace);
 	}
 
 	do {
@@ -3374,17 +3403,70 @@ static struct mmc_driver mmc_driver = {
 	.shutdown	= mmc_blk_shutdown,
 };
 
+static int mmc_onpersist_trace(const char *trace) {
+        size_t len = strlen(trace);
+        size_t offset = mmc_btrace.offset; 
+        size_t time_str_len = 13;
+        struct timeval time;
+
+        spin_lock(&mmc_btrace.lock);
+        if (!mmc_btrace.enable)
+            goto no_trace;
+
+        if (len + time_str_len + offset > MMC_BLK_TRACE_SIZE) {
+            pr_warning("onpersist: trace buffer full, drop old traces\n");
+            memset(mmc_btrace.data, 0, MMC_BLK_TRACE_SIZE);
+            mmc_btrace.offset = 0;
+        }
+
+        // Time string
+        do_gettimeofday(&time);
+        // The 14th char is '\0'
+        len = snprintf(mmc_btrace.data + mmc_btrace.offset, 14, "%12lu ", time.tv_sec*1000000 + time.tv_usec);
+        mmc_btrace.offset += len;
+        // IO string
+        len = strlen(trace);
+        memcpy(mmc_btrace.data + mmc_btrace.offset, trace, len);
+        mmc_btrace.offset += len;
+no_trace:
+        spin_unlock(&mmc_btrace.lock);
+
+        return 0;
+}
+
 static ssize_t mmc_onpersist_file_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
 {
-        printk("Persist buffered writes.\n"); 
+	char input[2];
+        unsigned int switch_val;
+
+	if (count > sizeof(input))
+		return -EINVAL;
+
+	if (copy_from_user(input, buf, count))
+		return -EFAULT;
+        input[1] = '\0';
+
+	if (kstrtouint(input, 10, &switch_val))
+		return -EINVAL;
+
+        spin_lock(&mmc_btrace.lock);
+        if (switch_val == 0) {
+            mmc_btrace.enable = false; 
+        } else {
+            mmc_btrace.enable = true;
+        }
+        spin_unlock(&mmc_btrace.lock);
 
         return count;
 }
 
 static int mmc_onpersist_show(struct seq_file *sf, void *data)
 {
-        seq_printf(sf, "trace is on the way.\n");    
-
+        spin_lock(&mmc_btrace.lock);
+        seq_puts(sf, mmc_btrace.data);
+        memset(mmc_btrace.data, 0, MMC_BLK_TRACE_SIZE);
+        mmc_btrace.offset = 0;
+        spin_unlock(&mmc_btrace.lock);
         return 0;
 }
 
@@ -3412,7 +3494,16 @@ static int mmc_register_debugfs_file(void)
         return -ENODEV;
     }
 
-    file = debugfs_create_file("trace", S_IWUSR | S_IRUGO, parent, NULL, &mmc_onpersist_fops);
+    // init trace buffer struct
+    spin_lock_init(&mmc_btrace.lock);
+    mmc_btrace.enable = false;
+    mmc_btrace.data = kzalloc(MMC_BLK_TRACE_SIZE, GFP_KERNEL);
+    if (mmc_btrace.data == NULL) {
+        pr_err("Error on create mmc blk trace buffer.\n");
+    }
+    mmc_btrace.offset = 0;
+
+    file = debugfs_create_file("trace", S_IWUSR | S_IRUGO, parent, &mmc_btrace, &mmc_onpersist_fops);
     if (IS_ERR_OR_NULL(file)) {
         pr_err("Cannot create file in debugfs\n"); 
         return -ENODEV;
