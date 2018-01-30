@@ -111,6 +111,10 @@ struct mmc_blk_trace {
 static struct mmc_blk_trace mmc_btrace;
 
 static int mmc_onpersist_trace(const char *trace);
+static int mmc_onpersist_blk_end_packed_req(const char* trace,
+        struct mmc_queue_req *mq_rq);
+static bool mmc_onpersist_blk_end_request(const char* trace,
+        struct request *rq, int error, unsigned int nr_bytes);
 
 /* 4kb trace buffer */
 #define MMC_BLK_TRACE_SIZE        (1 << 12)
@@ -1514,9 +1518,11 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
 	struct mmc_card *card = md->queue.card;
 	int ret = 0;
         char trace[MMC_BLK_TRACE_LINE_LEN+1];
+        struct timeval time;
 
-        snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "F\n");
-        mmc_onpersist_trace(trace);
+        do_gettimeofday(&time);
+        snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "%12lu F\n",
+                time.tv_sec*1000000 + time.tv_usec);
 
 	ret = mmc_flush_cache(card);
 	if (ret) {
@@ -1526,6 +1532,8 @@ static int mmc_blk_issue_flush(struct mmc_queue *mq, struct request *req)
 	}
 
 	blk_end_request_all(req, ret);
+
+        mmc_onpersist_trace(trace);
 
 	return ret ? 0 : 1;
 }
@@ -2552,23 +2560,29 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 	struct mmc_async_req *areq;
 	const u8 packed_num = 2;
 	u8 reqs = 0;
+        char trace[MMC_BLK_TRACE_LINE_LEN+1];
+
+        memset(trace, 0, MMC_BLK_TRACE_LINE_LEN+1);
 
 	if (!rqc && !mq->mqrq_prev->req)
 		return 0;
 
 	if (rqc) {
                 char rw;
-                char trace[MMC_BLK_TRACE_LINE_LEN+1];
+                struct timeval time;
 
 		if ((card->ext_csd.bkops_en) && (rq_data_dir(rqc) == WRITE))
 			card->bkops_info.sectors_changed += blk_rq_sectors(rqc);
 		reqs = mmc_blk_prep_packed_list(mq, rqc);
 
                 rw = (rq_data_dir(rqc) == WRITE)?'W':'R';
-                snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "%c %lu %lu %sp%d\n",
+
+                // Get request start time
+                do_gettimeofday(&time);
+                snprintf(trace, MMC_BLK_TRACE_LINE_LEN+1, "%12lu %c %lu %lu %sp%d\n",
+                        time.tv_sec*1000000 + time.tv_usec,
                         rw, (unsigned long) blk_rq_pos(rqc),
                         (unsigned long) blk_rq_sectors(rqc), md->disk->disk_name, rqc->part->partno);
-                mmc_onpersist_trace(trace);
 	}
 
 	do {
@@ -2617,10 +2631,10 @@ static int mmc_blk_issue_rw_rq(struct mmc_queue *mq, struct request *rqc)
 			mmc_blk_reset_success(md, type);
 
 			if (mq_rq->packed_cmd != MMC_PACKED_NONE) {
-				ret = mmc_blk_end_packed_req(mq_rq);
+				ret = mmc_onpersist_blk_end_packed_req(trace, mq_rq);
 				break;
 			} else {
-				ret = blk_end_request(req, 0,
+				ret = mmc_onpersist_blk_end_request(trace, req, 0,
 						brq->data.bytes_xfered);
 			}
 
@@ -3403,6 +3417,22 @@ static struct mmc_driver mmc_driver = {
 	.shutdown	= mmc_blk_shutdown,
 };
 
+static int mmc_onpersist_blk_end_packed_req(const char* trace,
+        struct mmc_queue_req *mq_rq)
+{
+        if(strlen(trace) > 0)
+            mmc_onpersist_trace(trace);
+        return mmc_blk_end_packed_req(mq_rq);
+}
+
+static bool mmc_onpersist_blk_end_request(const char* trace,
+        struct request *rq, int error, unsigned int nr_bytes) {
+        if(strlen(trace) > 0)
+            mmc_onpersist_trace(trace);
+        return blk_end_request(rq, error, nr_bytes);
+}
+
+/* mmc_onpersist_trace prints i/o end time at the beginning of trace */
 static int mmc_onpersist_trace(const char *trace) {
         size_t len = strlen(trace);
         size_t offset = mmc_btrace.offset; 
